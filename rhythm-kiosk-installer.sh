@@ -68,6 +68,7 @@ usbutils unzip evtest joystick
 pipewire-audio pipewire-alsa wireplumber alsa-utils
 mesa-vulkan-drivers vulkan-tools
 libxss1 libxcursor1 libxrandr2 libxinerama1 libxi6
+libopengl0 libjack-jackd2-0
 fonts-dejavu unclutter-xfixes"
 # In unattended mode (preseed late_command) wrap the big install in
 # debconf-apt-progress so the d-i UI shows a real progress bar instead of
@@ -117,6 +118,21 @@ chmod 644 "$ROOT"/*.conf
 
 say "keybinds into rc.xml"
 sudo -u "$KUSER" -H "$ROOT/bin/install-keybinds.sh"
+
+if [[ "$UNATTENDED" == "1" ]]; then
+  say "network (DHCP on any wired interface via systemd-networkd)"
+  # The ISO install disables the Debian installer's own network setup, so the
+  # installed system needs a name-agnostic config: DHCP on any en* interface.
+  mkdir -p /etc/systemd/network
+  cat > /etc/systemd/network/99-rhythm-dhcp.network <<'NET'
+[Match]
+Name=en*
+
+[Network]
+DHCP=yes
+NET
+  systemctl enable systemd-networkd >/dev/null 2>&1 || true
+fi
 
 say "apt sources (normal Debian mirrors for online updates)"
 # The offline-install ISO configures no network mirrors; add the standard ones

@@ -15,6 +15,7 @@ chroot "$CH" apt-get install --download-only -y \
   mesa-vulkan-drivers vulkan-tools \
   intel-microcode firmware-misc-nonfree \
   libxss1 libxcursor1 libxrandr2 libxinerama1 libxi6 \
+  libopengl0 libjack-jackd2-0 \
   libfuse2t64 fonts-dejavu unclutter-xfixes
 mkdir -p "$REPO"
 cp "$CH"/var/cache/apt/archives/*.deb "$REPO"/
