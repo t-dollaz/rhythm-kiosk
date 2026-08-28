@@ -1,0 +1,435 @@
+#!/usr/bin/env bash
+# Install destination: /opt/rhythm-kiosk/bin/rhythm-launch   (mode 0755, root:root)
+#
+# THE game-switch wrapper for the rhythm-game kiosk.
+#
+#   rhythm-launch <game-id> [--windowed]   kill whatever is running, then start <game-id>
+#   rhythm-launch --kill                   kill whatever is running, return to the desktop
+#
+# Every launch also arms a DEATH WATCH: a detached copy of this script
+# (--death-watch, internal) re-checks the game a few seconds later and, if it
+# already exited, alerts on the TV with the exit status, the tail of the game's
+# output and the path of games.conf. A game stopped deliberately -- by --kill or
+# by a switch to another game -- never alerts, because those paths remove the
+# pidfile before signalling and the watch checks for it.
+#
+# Hard rule: two games must NEVER run at the same time. Every launch path
+# (boot selector, Openbox hotkey, Openbox root/pipe menu) goes through here,
+# and the kill is unconditional and unconfirmed -- the kiosk has no keyboard
+# most of the time, so there is nobody to answer a prompt.
+#
+# Game commands come from /opt/rhythm-kiosk/games.conf:
+#   GAME_ID|DISPLAY_NAME|FULLSCREEN_CMD|WINDOWED_CMD
+# ('#' comments and blank lines ignored.)
+
+set -euo pipefail
+
+KIOSK_ROOT=${RHYTHM_KIOSK_ROOT:-/opt/rhythm-kiosk}
+GAMES_CONF=${RHYTHM_GAMES_CONF:-$KIOSK_ROOT/games.conf}
+
+RUN_DIR=${RHYTHM_RUN_DIR:-/run/user/$(id -u)/rhythm-kiosk}
+PID_FILE=$RUN_DIR/current-game.pid
+LOG_FILE=$RUN_DIR/current-game.log
+# Written by the launch wrapper when the game exits on its own, so the death
+# watch can report a real exit status instead of guessing.
+STATUS_FILE=$RUN_DIR/current-game.status
+
+# Seconds to wait for a SIGTERM'd game to exit before escalating to SIGKILL.
+TERM_GRACE=${RHYTHM_TERM_GRACE:-8}
+# Seconds to wait after SIGKILL before giving up and launching anyway.
+KILL_GRACE=${RHYTHM_KILL_GRACE:-3}
+# Seconds the death watch waits before checking the game is still up.
+DEATH_WATCH_DELAY=${RHYTHM_DEATH_WATCH_DELAY:-3}
+# Lines of game output quoted in a death alert.
+LOG_TAIL_LINES=${RHYTHM_LOG_TAIL_LINES:-15}
+
+# Shared alert helper: logs to the persistent kiosk log and pops a backgrounded
+# xmessage when DISPLAY is up. It is installed by its own part of this
+# changeset and may legitimately be absent, so every call falls back to stderr.
+KIOSK_ALERT=${RHYTHM_KIOSK_ALERT:-$KIOSK_ROOT/bin/kiosk-alert}
+
+PROG=${0##*/}
+# Absolute path to this script: the detached death watch re-invokes it, and the
+# caller's cwd is not ours to rely on.
+SELF=$(readlink -f "$0" 2>/dev/null) || SELF=$0
+
+log()  { printf '%s: %s\n' "$PROG" "$*" >&2; }
+die()  { log "$*"; exit 1; }
+
+# alert <title> <body> -- never blocks, never fails, never delays anything.
+# kiosk-alert also appends <body> to the persistent kiosk log, which is how
+# evidence copied out of $LOG_FILE (a /run tmpfs file) survives a reboot.
+alert() {
+	if [[ -x $KIOSK_ALERT ]] && "$KIOSK_ALERT" "$1" "$2" >/dev/null 2>&1; then
+		return 0
+	fi
+	printf '%s: %s\n%s\n' "$PROG" "$1" "$2" >&2
+	return 0
+}
+
+# die_visible <title> <body> -- fatal, and loud on the TV. Hotkeys and menu
+# entries have no terminal attached, so stderr alone is a silent failure.
+# stderr is still written, for the terminal case.
+die_visible() {
+	printf '%s: %s\n%s\n' "$PROG" "$1" "$2" >&2
+	if [[ -n ${DISPLAY:-} ]]; then
+		alert "$1" "$2"
+	fi
+	exit 1
+}
+
+# The games config is the only source of launch commands; without it the kiosk
+# cannot start anything at all, so name the file that has to be fixed.
+conf_unreadable() {
+	die_visible "Cannot read games.conf" \
+"rhythm-launch could not read the games config:
+
+  $GAMES_CONF
+
+It is missing, or unreadable by $(id -un 2>/dev/null || echo "$USER").
+Every game's launch command lives in that file -- restore it (mode 0644,
+root:root) and try again."
+}
+
+usage() {
+	cat >&2 <<-EOF
+	usage: $PROG <game-id> [--windowed]
+	       $PROG --kill
+	       $PROG --list
+
+	Game ids are the first field of $GAMES_CONF.
+	EOF
+}
+
+# ---------------------------------------------------------------- games.conf
+
+trim() {
+	local s=$1
+	s=${s#"${s%%[![:space:]]*}"}
+	s=${s%"${s##*[![:space:]]}"}
+	printf '%s' "$s"
+}
+
+# Populated by lookup_game().
+GAME_ID=''
+GAME_NAME=''
+GAME_FULL_CMD=''
+GAME_WIN_CMD=''
+
+# lookup_game <game-id> -> 0 if found (globals set), 1 if not found
+lookup_game() {
+	local want=$1 line id name full win
+	[[ -r $GAMES_CONF ]] || conf_unreadable
+
+	while IFS= read -r line || [[ -n $line ]]; do
+		line=${line%$'\r'}                       # tolerate CRLF
+		[[ $line =~ ^[[:space:]]*(#|$) ]] && continue
+		IFS='|' read -r id name full win <<<"$line"
+		id=$(trim "${id-}")
+		[[ $id == "$want" ]] || continue
+
+		GAME_ID=$id
+		GAME_NAME=$(trim "${name-}")
+		GAME_FULL_CMD=$(trim "${full-}")
+		GAME_WIN_CMD=$(trim "${win-}")
+		[[ -n $GAME_NAME ]] || GAME_NAME=$id
+		return 0
+	done <"$GAMES_CONF"
+
+	return 1
+}
+
+list_games() {
+	local line id name
+	[[ -r $GAMES_CONF ]] || conf_unreadable
+	while IFS= read -r line || [[ -n $line ]]; do
+		line=${line%$'\r'}
+		[[ $line =~ ^[[:space:]]*(#|$) ]] && continue
+		IFS='|' read -r id name _ <<<"$line"
+		printf '%s\t%s\n' "$(trim "${id-}")" "$(trim "${name-}")"
+	done <"$GAMES_CONF"
+}
+
+# ------------------------------------------------------------- process group
+
+# pgid_of <pid> -> prints the process-group id, or nothing if the pid is gone.
+# /proc/<pid>/stat field 2 (comm) may contain spaces and parens, so cut after
+# the LAST ')': the remaining fields are state, ppid, pgrp, ...
+pgid_of() {
+	local pid=$1 stat rest pgrp
+	stat=$(cat "/proc/$pid/stat" 2>/dev/null) || return 1
+	rest=${stat##*') '}
+	read -r _ _ pgrp _ <<<"$rest" || return 1
+	[[ $pgrp =~ ^[0-9]+$ ]] || return 1
+	printf '%s' "$pgrp"
+}
+
+alive() { kill -0 "$1" 2>/dev/null; }
+
+# Read the recorded pid, sanity-checking it. Prints nothing when there is no
+# live game (missing pidfile, garbage contents, or a stale pid).
+active_pid() {
+	local pid
+	[[ -f $PID_FILE ]] || return 0
+	pid=$(cat "$PID_FILE" 2>/dev/null) || return 0
+	pid=$(trim "$pid")
+
+	if [[ ! $pid =~ ^[0-9]+$ ]] || (( pid <= 1 )); then
+		log "ignoring malformed pidfile $PID_FILE"
+		rm -f "$PID_FILE"
+		return 0
+	fi
+	if ! alive "$pid"; then
+		# Normal case after a game exits on its own.
+		rm -f "$PID_FILE"
+		return 0
+	fi
+	printf '%s' "$pid"
+}
+
+# Kill the running game, if any. Never fails the script: a game we cannot kill
+# must not stop the user from getting somewhere.
+kill_active() {
+	local pid pgid target waited
+	pid=$(active_pid)
+	if [[ -z $pid ]]; then
+		return 0
+	fi
+
+	# We start games via `setsid --fork`, so the recorded pid is its own
+	# session/process-group leader and "-pid" signals the whole game tree
+	# (launcher shell, wine/mono/proton helpers, audio threads...).
+	pgid=$(pgid_of "$pid" || true)
+	if [[ -n $pgid && $pgid == "$pid" ]]; then
+		target="-$pid"
+	else
+		# PID recycled, or the game re-parented itself out of its group.
+		# Fall back to the single process rather than signalling a group
+		# that may now belong to something else entirely.
+		log "pid $pid is not a process-group leader; signalling it alone"
+		target=$pid
+	fi
+
+	# Drop the pidfile BEFORE signalling. The death watch treats a missing or
+	# changed pidfile as "somebody stopped this on purpose" and keeps quiet, so
+	# --kill and game switches never pop a bogus "game died" alert.
+	rm -f "$PID_FILE"
+
+	log "stopping active game (pid $pid)"
+	kill -TERM "$target" 2>/dev/null || true
+
+	waited=0
+	while alive "$pid" && (( waited < TERM_GRACE * 10 )); do
+		sleep 0.1
+		waited=$(( waited + 1 ))
+	done
+
+	if alive "$pid"; then
+		log "game ignored SIGTERM after ${TERM_GRACE}s; sending SIGKILL"
+		kill -KILL "$target" 2>/dev/null || true
+		waited=0
+		while alive "$pid" && (( waited < KILL_GRACE * 10 )); do
+			sleep 0.1
+			waited=$(( waited + 1 ))
+		done
+	fi
+
+	if alive "$pid"; then
+		log "WARNING: pid $pid still alive (unkillable / D-state?); continuing"
+	fi
+
+	rm -f "$PID_FILE"
+	return 0
+}
+
+# ------------------------------------------------------------------- launch
+
+launch_game() {
+	local cmd=$1 pid waited
+
+	# The child writes its own pid: after `setsid --fork` the inner bash is the
+	# session leader, so $$ there == pid == pgid, which is exactly what
+	# kill_active() wants. The inner shell deliberately does NOT exec the game:
+	# it stays the group leader and records the exit status once the game is
+	# gone, which is what lets the death watch report *how* it died. Signalling
+	# "-pid" still takes down the whole tree, wrapper included.
+	rm -f "$PID_FILE" "$STATUS_FILE"
+	# shellcheck disable=SC2016  # deliberate: $1..$3 are the child's args, not expansions
+	setsid --fork bash -c '
+		echo $$ >"$1"
+		bash -c "$2"
+		printf "%s" "$?" >"$3"
+	' rhythm-game "$PID_FILE" "$cmd" "$STATUS_FILE" >>"$LOG_FILE" 2>&1 </dev/null
+
+	# setsid's parent exits immediately; give the child a moment to land.
+	waited=0
+	while [[ ! -s $PID_FILE ]] && (( waited < 50 )); do
+		sleep 0.1
+		waited=$(( waited + 1 ))
+	done
+
+	pid=$(cat "$PID_FILE" 2>/dev/null || true)
+	if [[ -n $pid ]]; then
+		log "started $GAME_NAME (pid $pid); output -> $LOG_FILE"
+		start_death_watch "$pid"
+	else
+		log "WARNING: $GAME_NAME started but no pid was recorded"
+	fi
+}
+
+# start_death_watch <pid> -- fire and forget. `setsid --fork` puts the watch in
+# a session of its own so it outlives this script (and the Openbox hotkey that
+# ran it), and setsid's parent exits at once, so the caller is never delayed.
+# The environment is passed explicitly: the watch must read the same config and
+# run files we did, whether or not the caller exported anything.
+start_death_watch() {
+	setsid --fork env \
+		RHYTHM_KIOSK_ROOT="$KIOSK_ROOT" \
+		RHYTHM_GAMES_CONF="$GAMES_CONF" \
+		RHYTHM_RUN_DIR="$RUN_DIR" \
+		RHYTHM_KIOSK_ALERT="$KIOSK_ALERT" \
+		RHYTHM_DEATH_WATCH_DELAY="$DEATH_WATCH_DELAY" \
+		RHYTHM_LOG_TAIL_LINES="$LOG_TAIL_LINES" \
+		"$SELF" --death-watch "$1" "$GAME_ID" "$GAME_NAME" \
+		</dev/null >/dev/null 2>&1 &
+}
+
+# death_watch <pid> <game-id> <game-name> -- internal, see start_death_watch.
+# A game that is gone seconds after launch never reached the TV, and the person
+# standing in front of the kiosk has no terminal to read: say what died, why,
+# and which file holds the command that has to be fixed.
+death_watch() {
+	local pid=$1 id=$2 name=$3 recorded status tail_out body
+
+	sleep "$DEATH_WATCH_DELAY"
+
+	# Deliberate stops (--kill, or a switch to another game) remove the pidfile
+	# before signalling, and a fresh launch writes a different pid into it.
+	# Either way this game is no longer the one in charge: stay quiet.
+	recorded=$(trim "$(cat "$PID_FILE" 2>/dev/null || true)")
+	[[ $recorded == "$pid" ]] || return 0
+
+	if alive "$pid"; then
+		return 0
+	fi
+
+	# Died on its own: a bad path in games.conf, a missing library, an instant
+	# crash. Clear the now-stale pidfile so the next launch does not trip on it.
+	rm -f "$PID_FILE"
+
+	status=$(trim "$(cat "$STATUS_FILE" 2>/dev/null || true)")
+	case $status in
+		'')  status='unknown (died before it could report one)' ;;
+		126) status='126 (found, but not executable)' ;;
+		127) status='127 (command or binary not found)' ;;
+	esac
+
+	tail_out=$(tail -n "$LOG_TAIL_LINES" "$LOG_FILE" 2>/dev/null || true)
+	[[ -n $tail_out ]] || tail_out='(the game produced no output at all)'
+
+	body="Game '$name' ($id) exited within ${DEATH_WATCH_DELAY}s of launch.
+Exit status: $status
+
+Its launch command is the line beginning '$id|' in:
+
+  $GAMES_CONF
+
+Last $LOG_TAIL_LINES lines of $LOG_FILE:
+
+$tail_out"
+
+	alert "Game failed to start: $name" "$body"
+	return 0
+}
+
+# --------------------------------------------------------------------- main
+
+main() {
+	local game='' windowed=0 arg cmd known
+
+	(( $# )) || { usage; exit 1; }
+
+	# Internal re-invocation from start_death_watch(); not a user-facing mode,
+	# so it is handled before the option parser (which rejects unknown -flags)
+	# and before the unconditional kill below.
+	if [[ ${1-} == '--death-watch' ]]; then
+		death_watch "${2-}" "${3-}" "${4-}"
+		exit 0
+	fi
+
+	for arg in "$@"; do
+		case $arg in
+			--kill)     game='--kill' ;;
+			--list)     game='--list' ;;
+			--windowed) windowed=1 ;;
+			-h|--help)  usage; exit 0 ;;
+			-*)         usage; die "unknown option: $arg" ;;
+			*)
+				[[ -z $game ]] || { usage; die "only one game id may be given"; }
+				game=$arg
+				;;
+		esac
+	done
+
+	[[ -n $game ]] || { usage; exit 1; }
+
+	mkdir -p "$RUN_DIR"
+
+	if [[ $game == '--list' ]]; then
+		list_games
+		exit 0
+	fi
+
+	# Every path kills first -- including --kill, which stops there.
+	kill_active
+
+	if [[ $game == '--kill' ]]; then
+		log "returned to desktop (maintenance mode)"
+		exit 0
+	fi
+
+	if ! lookup_game "$game"; then
+		known=$(list_games | cut -f1 | tr '\n' ' ')
+		die_visible "Unknown game: $game" \
+"rhythm-launch was asked to start game id '$game', which is not
+defined in:
+
+  $GAMES_CONF
+
+Known ids: $known
+
+Add a line for it (GAME_ID|DISPLAY_NAME|FULLSCREEN_CMD|WINDOWED_CMD),
+or fix the caller that asked for '$game'."
+	fi
+
+	if (( windowed )); then
+		cmd=$GAME_WIN_CMD
+		if [[ -z $cmd ]]; then
+			log "no windowed command for '$GAME_ID'; using fullscreen command"
+			cmd=$GAME_FULL_CMD
+		fi
+	else
+		cmd=$GAME_FULL_CMD
+	fi
+	if [[ -z $cmd ]]; then
+		die_visible "Game not configured: $GAME_NAME" \
+"No launch command is configured for '$GAME_ID' in:
+
+  $GAMES_CONF
+
+Fix the line beginning '$GAME_ID|' -- the format is
+
+  GAME_ID|DISPLAY_NAME|FULLSCREEN_CMD|WINDOWED_CMD
+
+and at least FULLSCREEN_CMD must be filled in."
+	fi
+
+	# Hotkeys and menu entries inherit DISPLAY from Openbox; the boot selector
+	# runs from the Openbox autostart, so it does too. Default anyway.
+	export DISPLAY=${DISPLAY:-:0}
+
+	: >"$LOG_FILE"
+	launch_game "$cmd"
+}
+
+main "$@"

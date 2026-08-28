@@ -1,0 +1,106 @@
+#!/usr/bin/env bash
+# rhythm-kiosk :: install to /opt/rhythm-kiosk/bin/kiosk-alert  (chmod 755)
+#
+# The one place the kiosk shouts for help.
+#
+#   kiosk-alert <TITLE> <BODY>        BODY may be multiline
+#
+# Project contract: nothing that stops the OS booting, a game booting, or a
+# controller being handled may fail silently, and the message must NAME THE
+# FILE the user has to open. Callers supply that path in BODY; this helper
+# guarantees the message is (a) written to a persistent log that survives the
+# reboot, and (b) put on screen when there is a screen to put it on.
+#
+# What it does:
+#   1. appends a timestamped entry to  ~/.local/state/rhythm-kiosk/kiosk.log
+#      (XDG state dir; self-trimmed to the last 500 lines once it passes 1000)
+#   2. if $DISPLAY is set and xmessage(1) is available, pops a dialog with the
+#      title, the body, and always a final "Full log: <path>" line.
+#      NO -timeout: the dialog stays up until it is dismissed (Tyler's call --
+#      an error that vanishes before anyone walks over is a silent error).
+#      It is BACKGROUNDED, so a caller that is mid-boot never blocks on it.
+#   3. otherwise (no X yet, or no xmessage installed) logs only.
+#
+# xmessage is stock X11 (x11-utils) -- deliberately not zenity/yad/notify-send:
+# no desktop, no notification daemon, and no dependency beyond Xorg itself.
+#
+# Exit status is ALWAYS 0. A broken alert must never take down its caller.
+#
+# Dry-run / testing:
+#   RHYTHM_KIOSK_STATE_DIR=/tmp/state ./kiosk-alert "title" "body"
+# redirects the log (and the "Full log:" line) to that directory instead of
+# the kiosk user's state dir. XDG_STATE_HOME is honoured when it is unset.
+
+# No -e: every step here is best-effort by design (see exit 0 at the bottom).
+set -u
+
+# Log rotation thresholds (lines).
+MAX_LINES=1000
+KEEP_LINES=500
+
+# HOME can be unset when something calls us from a bare service context.
+if [[ -z "${HOME:-}" ]]; then
+	HOME=$(getent passwd "$(id -u)" 2>/dev/null | cut -d: -f6)
+	[[ -n "$HOME" ]] || HOME=/tmp
+fi
+
+STATE_DIR="${RHYTHM_KIOSK_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/rhythm-kiosk}"
+LOG="$STATE_DIR/kiosk.log"
+
+title=${1-}
+body=${2-}
+
+# Being called wrong is itself a bug worth seeing, so report it rather than
+# silently doing nothing.
+if [[ -z "$title" && -z "$body" ]]; then
+	title="kiosk-alert was called with no message"
+	body="A kiosk script called kiosk-alert without arguments. That is a bug in the calling script, not a controller problem."
+fi
+[[ -n "$title" ]] || title="(no title)"
+
+# ------------------------------------------------------------------ the log
+
+if mkdir -p -- "$STATE_DIR" 2>/dev/null; then
+	{
+		printf '%s  %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$title"
+		# Indent the body so multiline entries stay visually attached to
+		# their timestamp when the log is read with `less`/`tail`.
+		[[ -n "$body" ]] && printf '%s\n' "$body" | sed 's/^/    /'
+	} >>"$LOG" 2>/dev/null || true
+
+	# Self-trim: this log lives forever on a box nobody logs into, so keep it
+	# bounded here rather than adding a logrotate config for one file.
+	lines=$(wc -l <"$LOG" 2>/dev/null) || lines=0
+	if [[ "$lines" =~ ^[0-9]+$ ]] && (( lines > MAX_LINES )); then
+		# Same directory => mv is an atomic rename, so a reader never sees
+		# a half-written log.
+		if tmp=$(mktemp -- "$LOG.XXXXXX" 2>/dev/null); then
+			if tail -n "$KEEP_LINES" -- "$LOG" >"$tmp" 2>/dev/null; then
+				mv -f -- "$tmp" "$LOG" 2>/dev/null || rm -f -- "$tmp"
+			else
+				rm -f -- "$tmp"
+			fi
+		fi
+	fi
+fi
+
+# --------------------------------------------------------------- the dialog
+
+if [[ -n "${DISPLAY:-}" ]] && command -v xmessage >/dev/null 2>&1; then
+	msg=$(printf '%s\n\n%s\n\nFull log: %s\n' "$title" "$body" "$LOG")
+
+	# setsid detaches the dialog from our session/process group, so it stays
+	# up even if whatever called us is killed as a group (rhythm-launch does
+	# exactly that to game trees). Backgrounded either way: the caller is
+	# usually mid-boot and must not wait for a human to click OK.
+	if command -v setsid >/dev/null 2>&1; then
+		printf '%s\n' "$msg" | setsid xmessage -center -title "rhythm-kiosk: $title" -file - >/dev/null 2>&1 &
+	else
+		printf '%s\n' "$msg" | xmessage -center -title "rhythm-kiosk: $title" -file - >/dev/null 2>&1 &
+	fi
+	# NOTE: no -fn/font override on purpose -- xmessage exits and shows
+	# nothing at all if the named font is missing, and a dialog nobody sees
+	# is the failure mode this whole helper exists to prevent.
+fi
+
+exit 0

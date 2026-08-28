@@ -1,0 +1,5 @@
+# built ISO and local artifacts
+*.iso
+wallpaper.png
+screenshots/
+.DS_Store

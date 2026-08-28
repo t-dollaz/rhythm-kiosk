@@ -1,0 +1,97 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Install destination: ~kiosk/.config/openbox/menu.xml
+
+  Maintenance-mode root menu for the rhythm-game kiosk.
+
+  Maintenance mode IS the bare Openbox desktop: no panel, no file-manager
+  desktop, just this right-click menu. It is reached by booting with no game
+  controller attached, or by killing the active game (W-0, or "Kill Active
+  Game" below). Deliberately short, because it is the whole UI.
+
+  "Games" is an Openbox PIPE MENU: Openbox runs games-pipemenu.sh each time the
+  submenu opens and parses its output, so entries are generated live from
+  /opt/rhythm-kiosk/games.conf and there is no second list to keep in sync.
+  Those entries launch in windowed mode, for settings editing on the desktop.
+
+  After editing this file, pick "Reconfigure Openbox" below.
+-->
+<openbox_menu xmlns="http://openbox.org/3.4/menu">
+
+  <!-- Live-generated from games.conf; each entry runs rhythm-launch in
+       windowed mode. Defined here, linked into root-menu by id below. -->
+  <menu id="rhythm-games" label="Games"
+        execute="/opt/rhythm-kiosk/bin/games-pipemenu.sh"/>
+
+  <menu id="root-menu" label="Rhythm Kiosk">
+
+    <menu id="rhythm-games"/>
+
+    <separator/>
+
+    <!-- lxterminal: light and quick. Installer files are chosen with a file
+         picker dialog, so the terminal needs no drag-and-drop support. -->
+    <item label="Terminal">
+      <action name="Execute">
+        <command>lxterminal</command>
+      </action>
+    </item>
+
+    <item label="File Manager">
+      <action name="Execute">
+        <command>pcmanfm</command>
+      </action>
+    </item>
+
+    <!-- The mapping editor is an interactive TUI, so it needs a terminal of
+         its own. It is expected to pause before exiting so its output stays
+         readable. -->
+    <item label="Mapping Editor">
+      <action name="Execute">
+        <command>lxterminal -e /opt/rhythm-kiosk/bin/mapping-editor.sh</command>
+      </action>
+    </item>
+
+    <separator/>
+
+    <!-- Unconditional, no confirmation: returns to this bare desktop. -->
+    <item label="Kill Active Game">
+      <action name="Execute">
+        <command>/opt/rhythm-kiosk/bin/rhythm-launch --kill</command>
+      </action>
+    </item>
+
+    <item label="Reconfigure Openbox">
+      <action name="Reconfigure"/>
+    </item>
+
+    <separator/>
+
+    <menu id="rhythm-session" label="Session">
+      <!-- Exit drops back to the tty, where .bash_profile re-runs startx, so
+           this is effectively "restart the session". -->
+      <item label="Exit to Console">
+        <action name="Exit"/>
+      </item>
+      <separator/>
+      <!-- systemctl reboot / poweroff for a logged-in local user is permitted
+           by the stock polkit rules on Debian; no sudo entry is needed. But
+           Openbox Execute has no terminal attached, so a polkit denial (the
+           usual cause: this logind session is not "active", e.g. after a
+           session was started outside getty autologin) would fail with no
+           sign whatsoever. Wrap both in sh -c and shout on failure. -->
+      <item label="Reboot">
+        <action name="Execute">
+          <command>sh -c 'sudo -n systemctl reboot || /opt/rhythm-kiosk/bin/kiosk-alert "Reboot failed" "sudo systemctl reboot was refused, so the kiosk is still running. Check that /etc/sudoers.d/010_kiosk-nopasswd is installed (sudo visudo -c). Reboot from a terminal with: sudo systemctl reboot"'</command>
+        </action>
+      </item>
+      <item label="Shut Down">
+        <action name="Execute">
+          <command>sh -c 'sudo -n systemctl poweroff || /opt/rhythm-kiosk/bin/kiosk-alert "Shut down failed" "sudo systemctl poweroff was refused, so the kiosk is still running. Check that /etc/sudoers.d/010_kiosk-nopasswd is installed (sudo visudo -c). Power off from a terminal with: sudo systemctl poweroff"'</command>
+        </action>
+      </item>
+    </menu>
+
+  </menu>
+
+</openbox_menu>

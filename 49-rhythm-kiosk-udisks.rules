@@ -1,0 +1,14 @@
+// rhythm-kiosk :: install to /etc/polkit-1/rules.d/49-rhythm-kiosk-udisks.rules
+//
+// Let the kiosk user mount/unmount/eject removable USB storage without any
+// authentication, so plugged-in sticks automount (udiskie) and game installers
+// can be loaded from them. Scoped to the kiosk user and udisks2 actions only.
+polkit.addRule(function(action, subject) {
+    if (subject.user == "kiosk" &&
+        (action.id.indexOf("org.freedesktop.udisks2.filesystem-mount") == 0 ||
+         action.id.indexOf("org.freedesktop.udisks2.filesystem-unmount") == 0 ||
+         action.id == "org.freedesktop.udisks2.eject-media" ||
+         action.id == "org.freedesktop.udisks2.power-off-drive")) {
+        return polkit.Result.YES;
+    }
+});

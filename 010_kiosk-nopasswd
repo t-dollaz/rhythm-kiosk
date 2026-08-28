@@ -1,0 +1,35 @@
+# rhythm-kiosk :: install to /etc/sudoers.d/010_kiosk-nopasswd
+#
+# Install with (mode 0440, root:root -- sudo REFUSES group/world-writable
+# sudoers files and ignores files whose names contain a '.' or end in '~'):
+#   sudo install -o root -g root -m 0440 \
+#        ~/rhythm-kiosk-staging/010_kiosk-nopasswd /etc/sudoers.d/010_kiosk-nopasswd
+#   sudo visudo -c        # MUST print "parsed OK" before you log out
+#
+# WHY THIS EXISTS
+# The mapping editor (/opt/rhythm-kiosk/bin/mapping-editor.sh) writes
+# root-owned files under /opt/rhythm-kiosk (games.conf, controllers.conf,
+# games/<id>/ payloads). The kiosk is a TV-attached appliance driven by a
+# controller and an occasional keyboard: a hidden sudo password prompt inside
+# a throwaway xterm is exactly the kind of silent stall this project bans.
+# With this drop-in the editor never prompts; without it the editor's
+# `sudo -n true` pre-flight fails LOUDLY and names this file.
+#
+# PRECEDENT: this is the RetroPie pattern -- RetroPie ships
+# /etc/sudoers.d/010_pi-nopasswd containing `pi ALL=(ALL) NOPASSWD: ALL`.
+# Same file-number prefix, same one-line grant, same purpose (an appliance
+# whose maintenance UI must never block on a password prompt).
+#
+# SSH CAVEAT
+# This makes the kiosk account's password the only thing between a remote
+# login and root. If the SSH server is enabled on this box, use KEY
+# AUTHENTICATION and disable password auth:
+#   PasswordAuthentication no
+# in /etc/ssh/sshd_config (then `sudo systemctl restart ssh`).
+# If SSH is not installed -- the default for this build -- physical access is
+# already root access and this changes nothing.
+#
+# The boot-into-game path uses NO sudo at all; this grant exists only for
+# maintenance mode.
+
+kiosk ALL=(ALL) NOPASSWD: ALL

@@ -1,0 +1,36 @@
+# shellcheck shell=sh
+# rhythm-kiosk :: install to ~kiosk/.config/openbox/autostart
+#
+# Openbox's stock autostart hook. It is run by openbox-session with sh once,
+# after the WM is up and the display is available.
+#
+# Openbox waits for this script to finish before it considers the session
+# started, so anything long-lived MUST be backgrounded with `&`. boot-selector
+# execs into the game and therefore never returns -- without the `&` the
+# session would hang here.
+#
+# One shot only: the selector reads USB exactly once and exits. No polling,
+# no hotplug handling. Replug + reboot is the documented way to change games
+# when no keyboard is attached.
+
+# Wallpaper: drop an image at /opt/rhythm-kiosk/wallpaper.png and it is set
+# here (one-shot, no resident process). No file = plain black desktop.
+[ -f /opt/rhythm-kiosk/wallpaper.png ] && command -v xwallpaper >/dev/null 2>&1 \
+  && xwallpaper --zoom /opt/rhythm-kiosk/wallpaper.png &
+
+# Hide the mouse cursor after 2s idle -- there is usually no mouse attached.
+unclutter --timeout 2 &
+
+# Automount plugged-in USB storage (game installers can live on a stick).
+# udisks2 does the mounting; the polkit rule 49-rhythm-kiosk-udisks.rules
+# authorizes it for the kiosk user. Mounts land at /media/kiosk/<label>.
+command -v udiskie >/dev/null 2>&1 && udiskie --automount --no-notify >/dev/null 2>&1 &
+
+/opt/rhythm-kiosk/bin/boot-selector.sh &
+
+# One-time guided setup on a fresh system (no games installed, or no
+# controllers assigned, and never completed before). The quiet --firstboot-check
+# gate decides; the setup itself runs in its own terminal window.
+if /opt/rhythm-kiosk/bin/mapping-editor.sh --firstboot-check; then
+  lxterminal -e /opt/rhythm-kiosk/bin/mapping-editor.sh --firstboot &
+fi

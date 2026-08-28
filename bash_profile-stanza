@@ -1,0 +1,103 @@
+# shellcheck shell=bash
+# rhythm-kiosk :: append to ~kiosk/.bash_profile (on the target PC: /home/kiosk/.bash_profile)
+#
+# Start X only on the physical console tty1 and only if we are not already
+# inside an X session. This is the RetroPie/Arch-canonical guard: it keeps
+# `startx` from firing on SSH logins, on other VTs, or in a terminal opened
+# inside the running Openbox session (which would recurse).
+#
+# SUPERVISED, not `exec startx`. The old `exec` form was a silent failure
+# machine: if X died on this box -- bad driver, no screens found, a typo in
+# .xinitrc -- the shell was gone, getty respawned, autologin ran, startx died
+# again, forever. On screen that is a black flicker with no message, and after
+# ~10 seconds systemd hits getty's start limit and gives you a dead tty1 with
+# nowhere to type. So instead:
+#
+#   * run startx WITHOUT exec, in a loop, so we outlive the session;
+#   * clean exit (status 0) = the user quit the session on purpose -> restart X;
+#   * NONZERO exit, or two exits inside 30 seconds = X is crash-looping ->
+#     stop, print a banner naming the exact log files, and STOP LOOPING;
+#   * then fall through to the ordinary interactive login shell. We do not
+#     exec and we do not exit: this live shell is what holds tty1 open, so
+#     getty never respawns and never hits its start limit. A keyboard plugged
+#     in at that point gets a working prompt with the diagnosis still on
+#     screen above it. That is the whole point of the supervision.
+#
+# The failure is also appended to the persistent kiosk log via kiosk-alert
+# (log-only here -- there is no X to draw a dialog on), so it survives the
+# reboot and can be read later from the maintenance desktop.
+#
+# Note: .bash_profile is only read by LOGIN shells. If the kiosk user has a
+# .profile as well, bash prefers .bash_profile and .profile will be ignored --
+# source it explicitly from here if the Debian default .profile matters.
+#
+# This file is SOURCED by bash, not run: no shebang, no `set -e`, no `local`,
+# and it cleans up its own variables so the interactive shell stays tidy.
+
+if [[ -z "${DISPLAY:-}" && "${XDG_VTNR:-}" == "1" ]]; then
+
+	_rk_root="${RHYTHM_KIOSK_ROOT:-/opt/rhythm-kiosk}"
+	_rk_log="${RHYTHM_KIOSK_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/rhythm-kiosk}/kiosk.log"
+	_rk_startx="${RHYTHM_STARTX:-startx}"   # override only for dry-run tests
+	_rk_prev_exit=0                         # when the previous session ended
+	_rk_rc=0
+	_rk_why=""
+
+	while true; do
+		"$_rk_startx"
+		_rk_rc=$?
+		_rk_now=${EPOCHSECONDS:-$(date +%s)}
+
+		if (( _rk_rc != 0 )); then
+			_rk_why="startx exited with status $_rk_rc (X failed to start, or died)."
+			break
+		fi
+
+		if (( _rk_prev_exit != 0 && _rk_now - _rk_prev_exit < 30 )); then
+			_rk_why="startx exited cleanly twice within 30 seconds -- X is restart-looping instead of running a session."
+			break
+		fi
+
+		# Clean exit, and not a loop: the session ended on purpose. Restart it.
+		_rk_prev_exit=$_rk_now
+	done
+
+	# ---- X is not coming back on its own. Say so, loudly and permanently. ----
+
+	# Persistent record first, so the message is still there after a reboot.
+	if [[ -x "$_rk_root/bin/kiosk-alert" ]]; then
+		"$_rk_root/bin/kiosk-alert" "X session failed on tty1" \
+"$_rk_why
+The kiosk stopped restarting X and dropped to a login shell on tty1." || true
+	else
+		mkdir -p -- "${_rk_log%/*}" 2>/dev/null &&
+			printf '%s  X session failed on tty1\n    %s\n' \
+				"$(date '+%Y-%m-%d %H:%M:%S')" "$_rk_why" >>"$_rk_log" 2>/dev/null
+	fi
+
+	printf '\n'
+	printf '========================================================================\n'
+	printf '  RHYTHM KIOSK: THE GRAPHICAL SESSION FAILED TO START\n'
+	printf '========================================================================\n'
+	printf '  %s\n' "$_rk_why"
+	printf '  No game can start until X does. X will NOT be retried automatically.\n'
+	printf '\n'
+	printf '  Look at these files, in this order:\n'
+	printf '\n'
+	printf '    1. /var/log/Xorg.0.log\n'
+	printf '         why the X server itself died (search for "(EE)")\n'
+	printf '    2. %s/.xsession-errors\n' "$HOME"
+	printf '         errors from ~/.xinitrc and the Openbox session\n'
+	printf '    3. %s\n' "$_rk_log"
+	printf '         the kiosk error log (controllers, launcher, this failure)\n'
+	printf '\n'
+	printf '  Also worth checking: %s/.xinitrc\n' "$HOME"
+	printf '  Retry by hand with:  startx\n'
+	printf '========================================================================\n'
+	printf '\n'
+	printf 'You are at a normal login shell on tty1; it is holding this console open\n'
+	printf 'on purpose, so do not log out until the problem is fixed.\n'
+	printf '\n'
+
+	unset _rk_root _rk_log _rk_startx _rk_prev_exit _rk_rc _rk_why _rk_now
+fi

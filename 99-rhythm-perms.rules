@@ -1,0 +1,38 @@
+# rhythm-kiosk :: install to /etc/udev/rules.d/99-rhythm-perms.rules
+#
+# PERMISSIONS ONLY. There are deliberately no RUN+= lines in this file:
+# udev runs as root with no session or display and kills long-lived children,
+# so game launching is done by boot-selector.sh from the Openbox session.
+# Do not add RUN+= here.
+#
+# Apply without rebooting:
+#   sudo udevadm control --reload-rules && sudo udevadm trigger
+
+# --- Nintendo / Mayflash WiiU GameCube controller adapter (057e:0337) -------
+# Dolphin talks to this adapter directly over libusb, which needs write access
+# to the raw USB device node. This is the rule from the Dolphin wiki's
+# "How to use the Official GameCube Controller Adapter in Dolphin" page,
+# normally shipped as /etc/udev/rules.d/51-gcadapter.rules.
+SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTRS{idVendor}=="057e", ATTRS{idProduct}=="0337", MODE="0666"
+
+# Same device, HID interface: give the local console user (kiosk) hidraw
+# access. TAG+="uaccess" is the modern systemd way -- it ACLs the node to
+# whoever is logged in at the seat, so no group membership is needed.
+KERNEL=="hidraw*", ATTRS{idVendor}=="057e", ATTRS{idProduct}=="0337", TAG+="uaccess", MODE="0660", GROUP="plugdev"
+
+# If uaccess does not take effect (no logind seat on this box), fall back to
+# plain group ownership and make sure `kiosk` is in plugdev:
+#   sudo usermod -aG plugdev kiosk
+# SUBSYSTEM=="usb", ATTRS{idVendor}=="057e", ATTRS{idProduct}=="0337", MODE="0660", GROUP="plugdev"
+
+# --- LTEK dance pad ---------------------------------------------------------
+# TODO(hardware): fill in the VID:PID from `lsusb`, then uncomment. Most pads
+# are plain HID gamepads and need no rule at all -- only add this if OutFox
+# cannot see the pad as an unprivileged user.
+# KERNEL=="hidraw*", ATTRS{idVendor}=="XXXX", ATTRS{idProduct}=="XXXX", TAG+="uaccess", MODE="0660", GROUP="plugdev"
+
+# --- CRKD guitar ------------------------------------------------------------
+# TODO(hardware): fill in the VID:PID from `lsusb`, then uncomment. If it
+# enumerates as generic XInput it will already work via the kernel xpad
+# driver and needs no rule.
+# KERNEL=="hidraw*", ATTRS{idVendor}=="XXXX", ATTRS{idProduct}=="XXXX", TAG+="uaccess", MODE="0660", GROUP="plugdev"
