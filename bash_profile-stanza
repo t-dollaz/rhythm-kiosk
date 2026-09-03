@@ -105,7 +105,8 @@ The kiosk stopped restarting X and dropped to a login shell on tty1." || true
 	printf '\n'
 	printf '  Look at these files, in this order:\n'
 	printf '\n'
-	printf '    1. /var/log/Xorg.0.log\n'
+	printf '    1. /var/log/Xorg.0.log (and ~/.local/share/xorg/Xorg.0.log --\n'
+	printf '       whichever is NEWEST; X logs to the second when it starts rootless)\n'
 	printf '         why the X server itself died (search for "(EE)")\n'
 	printf '    2. %s/.xsession-errors\n' "$HOME"
 	printf '         errors from ~/.xinitrc and the Openbox session\n'
