@@ -42,16 +42,37 @@ if [[ -z "${DISPLAY:-}" && "${XDG_VTNR:-}" == "1" ]]; then
 	_rk_prev_exit=0                         # when the previous session ended
 	_rk_rc=0
 	_rk_why=""
+	_rk_fails=0                             # consecutive nonzero startx exits
+
+	# X cannot start until the kernel has the GPU up (/dev/dri/card*). On a
+	# fast SSD boot autologin wins that race: seen on the EliteDesk 800 G3 at
+	# 4.5s uptime -- Xorg logs (EE) "failed to take device /dev/dri/card0: No
+	# such device" and exits before i915 has finished probing. So wait for the
+	# node (bounded at 15s), and treat a nonzero exit as possibly the same
+	# race: only three consecutive failures count as X being truly dead. Any
+	# session that starts resets the count, so a genuinely broken X still
+	# stops looping after ~10 seconds instead of forever.
 
 	while true; do
+		_rk_i=0
+		until compgen -G '/dev/dri/card*' >/dev/null || (( _rk_i >= 30 )); do
+			sleep 0.5
+			(( _rk_i++ ))
+		done
+
 		"$_rk_startx"
 		_rk_rc=$?
 		_rk_now=${EPOCHSECONDS:-$(date +%s)}
 
 		if (( _rk_rc != 0 )); then
-			_rk_why="startx exited with status $_rk_rc (X failed to start, or died)."
+			if (( ++_rk_fails < 3 )); then
+				sleep 3
+				continue
+			fi
+			_rk_why="startx exited with status $_rk_rc (X failed to start, or died) 3 times in a row."
 			break
 		fi
+		_rk_fails=0
 
 		if (( _rk_prev_exit != 0 && _rk_now - _rk_prev_exit < 30 )); then
 			_rk_why="startx exited cleanly twice within 30 seconds -- X is restart-looping instead of running a session."
@@ -99,5 +120,5 @@ The kiosk stopped restarting X and dropped to a login shell on tty1." || true
 	printf 'on purpose, so do not log out until the problem is fixed.\n'
 	printf '\n'
 
-	unset _rk_root _rk_log _rk_startx _rk_prev_exit _rk_rc _rk_why _rk_now
+	unset _rk_root _rk_log _rk_startx _rk_prev_exit _rk_rc _rk_why _rk_now _rk_fails _rk_i
 fi
